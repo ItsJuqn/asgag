@@ -76,6 +76,7 @@ const html = String.raw`<!DOCTYPE html>
     --green: #23a55a;
     --red: #f23f43;
     --yellow: #f0b232;
+    --chat-width: 340px;
   }
   html, body { height:100%; }
   body {
@@ -96,13 +97,6 @@ const html = String.raw`<!DOCTYPE html>
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     height: 100vh; gap: 20px; padding: 24px; animation: fadeIn .4s ease;
   }
-  #login .mark {
-    width: 80px; height: 80px; border-radius: 24px;
-    background: linear-gradient(135deg, #5865f2, #eb459e);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 2.5rem; margin-bottom: 8px;
-    box-shadow: 0 12px 40px rgba(88,101,242,.35);
-  }
   #login .card {
     background: var(--bg-2);
     padding: 32px;
@@ -112,17 +106,9 @@ const html = String.raw`<!DOCTYPE html>
     box-shadow: 0 20px 60px rgba(0,0,0,.5);
     display: flex; flex-direction: column; gap: 16px;
   }
-  #login .card h1 {
-    font-size: 1.5rem; font-weight: 600; text-align: center;
-    color: var(--text);
-  }
-  #login .card p {
-    font-size: .9rem; color: var(--text-muted); text-align: center;
-    margin-bottom: 4px;
-  }
   #login label {
     font-size: .72rem; font-weight: 700; color: var(--text-muted);
-    text-transform: uppercase; letter-spacing: .02em; margin-bottom: 6px;
+    text-transform: uppercase; letter-spacing: .02em; margin-bottom: 8px;
     display: block;
   }
   #login input {
@@ -145,7 +131,6 @@ const html = String.raw`<!DOCTYPE html>
   /* ============ APP ============ */
   #app { display: none; flex: 1; flex-direction: column; height: 100vh; }
 
-  /* ---- HEADER ---- */
   header {
     height: 48px;
     background: var(--bg-3);
@@ -218,16 +203,15 @@ const html = String.raw`<!DOCTYPE html>
     box-shadow: 0 0 6px var(--green);
   }
 
-  /* ---- MAIN ---- */
   main { flex: 1; display: flex; overflow: hidden; }
 
-  /* ---- VIDEO ---- */
   .video-area {
     flex: 1;
     background: #000;
     display: flex; align-items: center; justify-content: center;
     position: relative;
     overflow: hidden;
+    min-width: 0;
   }
   .video-area video, .video-area iframe {
     width: 100%; height: 100%; border: none; background: #000;
@@ -246,6 +230,33 @@ const html = String.raw`<!DOCTYPE html>
     font-size: .85rem;
     color: var(--text-dim);
   }
+
+  /* ===== DIVISOR ARRASTRABLE ===== */
+  .divider {
+    width: 6px;
+    background: var(--bg-1);
+    cursor: col-resize;
+    position: relative;
+    flex-shrink: 0;
+    transition: background .15s;
+    z-index: 5;
+  }
+  .divider::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 2px;
+    height: 40px;
+    background: #3f4147;
+    border-radius: 1px;
+    transition: background .15s, height .15s;
+  }
+  .divider:hover { background: var(--bg-2); }
+  .divider:hover::after { background: var(--accent); height: 60px; }
+  .divider.dragging { background: var(--bg-2); }
+  .divider.dragging::after { background: var(--accent); height: 60px; }
 
   .toast {
     position: absolute;
@@ -267,13 +278,14 @@ const html = String.raw`<!DOCTYPE html>
   .toast.warn { border-color: var(--yellow); color: var(--yellow); }
   .toast.err { border-color: var(--red); color: var(--red); }
 
-  /* ---- CHAT ---- */
   aside {
-    width: 340px;
+    width: var(--chat-width);
     background: var(--bg-2);
     display: flex;
     flex-direction: column;
-    border-left: 1px solid #1f2023;
+    flex-shrink: 0;
+    min-width: 220px;
+    max-width: 70vw;
   }
   aside .chat-header {
     height: 48px;
@@ -316,7 +328,6 @@ const html = String.raw`<!DOCTYPE html>
     scroll-behavior: smooth;
   }
 
-  /* Mensajes estilo Discord */
   .m {
     display: flex;
     gap: 14px;
@@ -372,7 +383,6 @@ const html = String.raw`<!DOCTYPE html>
     font-style: italic;
   }
 
-  /* Caja de escritura */
   .composer {
     padding: 0 16px 16px;
     flex-shrink: 0;
@@ -419,15 +429,15 @@ const html = String.raw`<!DOCTYPE html>
   }
   .composer .send-btn:hover { color: #fff; background: var(--accent); }
 
-  /* Animaciones */
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes slideDown { from { opacity: 0; transform: translate(-50%, -10px); } to { opacity: 1; transform: translate(-50%, 0); } }
   @keyframes msgIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
-  /* Responsive */
+  /* En móvil se apila y no se puede redimensionar */
   @media (max-width: 780px) {
     main { flex-direction: column; }
-    aside { width: 100%; height: 45vh; border-left: none; border-top: 1px solid #1f2023; }
+    .divider { display: none; }
+    aside { width: 100%; height: 45vh; border-top: 1px solid #1f2023; min-width: 0; max-width: none; }
     header .brand { display: none; }
   }
 </style>
@@ -435,10 +445,7 @@ const html = String.raw`<!DOCTYPE html>
 <body>
 
 <div id="login">
-  <div class="mark">🎬</div>
   <div class="card">
-    <h1>¡Bienvenido!</h1>
-    <p>Nos alegra verte de nuevo</p>
     <div>
       <label>Nombre</label>
       <input id="name" placeholder="¿Cómo te llamas?" maxlength="20" autofocus>
@@ -470,7 +477,8 @@ const html = String.raw`<!DOCTYPE html>
         <div class="hint">Pega un link arriba para empezar</div>
       </div>
     </div>
-    <aside>
+    <div class="divider" id="divider"></div>
+    <aside id="chat">
       <div class="chat-header">
         <h3><span class="hash">#</span> chat</h3>
         <span class="count" id="count2">0</span>
@@ -648,7 +656,44 @@ const html = String.raw`<!DOCTYPE html>
     return String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
   }
 
-  // Textarea auto-grow + Enter/Shift+Enter
+  // ========== DIVISOR ARRASTRABLE ==========
+  function initDivider() {
+    const divider = document.getElementById('divider');
+    const chat = document.getElementById('chat');
+    let dragging = false;
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const x = e.clientX || (e.touches && e.touches[0].clientX);
+      if (x == null) return;
+      const width = window.innerWidth - x;
+      if (width < 220 || width > window.innerWidth - 200) return;
+      chat.style.width = width + 'px';
+    };
+
+    const start = (e) => {
+      dragging = true;
+      divider.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    };
+    const stop = () => {
+      dragging = false;
+      divider.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    divider.addEventListener('mousedown', start);
+    divider.addEventListener('touchstart', start, { passive: false });
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('mouseup', stop);
+    document.addEventListener('touchend', stop);
+  }
+
+  // ========== INICIALIZACIÓN ==========
   window.addEventListener('load', () => {
     const ta = document.getElementById('msg');
     ta.addEventListener('keydown', e => {
@@ -661,11 +706,11 @@ const html = String.raw`<!DOCTYPE html>
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
     });
-    // Enter en login
     const nameInput = document.getElementById('name');
     nameInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') entrar();
     });
+    initDivider();
   });
 </script>
 </body>
