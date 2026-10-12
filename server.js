@@ -7,9 +7,9 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const rooms = {};
+const state = { users: {}, video: null, time: 0, playing: false };
 
-// --- GOOGLE DRIVE AUTH (cuenta de servicio vía variable de entorno) ---
+// --- DRIVE AUTH ---
 let drive = null;
 if (process.env.GOOGLE_SERVICE_ACCOUNT) {
   try {
@@ -19,45 +19,35 @@ if (process.env.GOOGLE_SERVICE_ACCOUNT) {
       scopes: ['https://www.googleapis.com/auth/drive.readonly']
     });
     drive = google.drive({ version: 'v3', auth });
-    console.log('✅ Drive API lista. Cuenta:', creds.client_email);
+    console.log('✅ Drive API lista:', creds.client_email);
   } catch (e) {
-    console.error('❌ Error al cargar credenciales de Drive:', e.message);
+    console.error('❌ Error Drive:', e.message);
   }
 } else {
-  console.log('⚠️  Sin GOOGLE_SERVICE_ACCOUNT. Drive usará modo iframe (sin sync).');
+  console.log('⚠️  Sin GOOGLE_SERVICE_ACCOUNT');
 }
 
-// --- ENDPOINT PROXY PARA DRIVE ---
-// El navegador pide /drive/FILE_ID y nosotros le pasamos el stream de Drive
+// --- PROXY DRIVE ---
 app.get('/drive/:fileId', async (req, res) => {
   if (!drive) return res.status(500).send('Drive no configurado');
-
   const { fileId } = req.params;
   const range = req.headers.range;
-
   try {
     const driveRes = await drive.files.get(
       { fileId, alt: 'media' },
-      {
-        responseType: 'stream',
-        headers: range ? { Range: range } : {}
-      }
+      { responseType: 'stream', headers: range ? { Range: range } : {} }
     );
-
     res.setHeader('Content-Type', driveRes.headers['content-type'] || 'video/mp4');
     res.setHeader('Accept-Ranges', 'bytes');
     if (driveRes.headers['content-length']) res.setHeader('Content-Length', driveRes.headers['content-length']);
     if (driveRes.headers['content-range']) {
       res.status(206);
       res.setHeader('Content-Range', driveRes.headers['content-range']);
-    } else {
-      res.status(200);
-    }
-
+    } else res.status(200);
     driveRes.data.pipe(res);
   } catch (e) {
     console.error('Error Drive:', e.message);
-    res.status(500).send('Error al obtener el video de Drive: ' + e.message);
+    res.status(500).send('Error: ' + e.message);
   }
 });
 
@@ -66,60 +56,195 @@ const HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🎬 Cine Sync</title>
+<title>🎬</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  * { margin:0; padding:0; box-sizing:border-box; font-family:system-ui,sans-serif; }
-  body { background:#0d0d1a; color:#fff; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
-  #login { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; gap:14px; padding:20px; }
-  #login h1 { font-size:2.5rem; background:linear-gradient(90deg,#a855f7,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-  #login input { padding:12px; border-radius:8px; border:1px solid #333; background:#1a1a2e; color:#fff; width:300px; max-width:100%; }
-  #login button { padding:12px 30px; border-radius:8px; border:none; background:linear-gradient(90deg,#a855f7,#ec4899); color:#fff; font-weight:600; cursor:pointer; }
-  #login small { color:#666; text-align:center; }
-  #app { display:none; flex:1; flex-direction:column; }
-  header { background:#1a1a2e; padding:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; border-bottom:1px solid #2a2a3e; }
-  header input { flex:1; min-width:180px; padding:8px; border-radius:6px; border:1px solid #333; background:#0d0d1a; color:#fff; }
-  header button { padding:8px 14px; border-radius:6px; border:none; background:#a855f7; color:#fff; cursor:pointer; }
-  header button.ghost { background:#2a2a3e; }
+  * { margin:0; padding:0; box-sizing:border-box; font-family:'Inter',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+  body {
+    background: radial-gradient(ellipse at top left, #1a0d2e 0%, #0a0a14 45%) fixed,
+                radial-gradient(ellipse at bottom right, #0d1a2e 0%, transparent 50%) fixed;
+    color:#f5f5f7; height:100vh; display:flex; flex-direction:column; overflow:hidden;
+  }
+
+  /* ---------- LOGIN ---------- */
+  #login {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    height:100vh; gap:18px; padding:24px; animation:fadeIn .5s ease;
+  }
+  #login .logo {
+    font-size:3.5rem; font-weight:700; letter-spacing:-.03em;
+    background:linear-gradient(135deg,#a855f7,#ec4899);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  }
+  #login input {
+    padding:14px 18px; border-radius:12px; border:1px solid rgba(168,85,247,.15);
+    background:rgba(20,20,35,.8); color:#fff; width:320px; max-width:100%;
+    font-size:1rem; outline:none; transition:border .2s, box-shadow .2s;
+  }
+  #login input:focus { border-color:#a855f7; box-shadow:0 0 0 3px rgba(168,85,247,.15); }
+  #login button {
+    padding:14px 40px; border-radius:12px; border:none;
+    background:linear-gradient(135deg,#a855f7,#ec4899);
+    color:#fff; font-weight:600; font-size:1rem; cursor:pointer;
+    width:320px; max-width:100%; transition:transform .15s, box-shadow .2s;
+    box-shadow:0 8px 24px rgba(168,85,247,.25);
+  }
+  #login button:hover { transform:translateY(-2px); box-shadow:0 12px 32px rgba(168,85,247,.4); }
+
+  /* ---------- APP ---------- */
+  #app { display:none; flex:1; flex-direction:column; animation:fadeIn .4s ease; }
+
+  header {
+    background:rgba(20,20,35,.75); backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+    padding:12px 16px; display:flex; gap:10px; align-items:center;
+    flex-wrap:wrap; border-bottom:1px solid rgba(168,85,247,.15); z-index:5;
+  }
+  header .input-wrap { flex:1; min-width:180px; display:flex; }
+  header input {
+    flex:1; padding:10px 14px; border-radius:10px 0 0 10px;
+    border:1px solid rgba(168,85,247,.15); border-right:none;
+    background:rgba(10,10,20,.7); color:#fff; font-size:.85rem;
+    outline:none; transition:border .2s;
+  }
+  header input:focus { border-color:#a855f7; }
+  header .load-btn {
+    padding:10px 18px; border-radius:0 10px 10px 0; border:1px solid transparent;
+    background:linear-gradient(135deg,#a855f7,#ec4899);
+    color:#fff; font-weight:600; font-size:.85rem; cursor:pointer;
+    white-space:nowrap; transition:opacity .2s;
+  }
+  header .load-btn:hover { opacity:.9; }
+  header .ghost {
+    padding:10px 14px; border-radius:10px; border:1px solid rgba(168,85,247,.15);
+    background:transparent; color:#f5f5f7; font-size:.85rem; cursor:pointer;
+    transition:background .2s; white-space:nowrap;
+  }
+  header .ghost:hover { background:rgba(168,85,247,.1); }
+  header .online {
+    display:flex; align-items:center; gap:6px; font-size:.85rem;
+    color:#8a8a9a; padding:0 8px;
+  }
+  header .online .dot {
+    width:8px; height:8px; border-radius:50%; background:#22c55e;
+    box-shadow:0 0 8px #22c55e; animation:pulse 2s infinite;
+  }
+
   main { flex:1; display:flex; overflow:hidden; }
-  .video { flex:1; background:#000; display:flex; align-items:center; justify-content:center; position:relative; }
-  .video video { width:100%; height:100%; background:#000; }
-  .video iframe { width:100%; height:100%; border:none; background:#000; }
-  .video .empty { color:#555; padding:20px; text-align:center; }
-  .banner { position:absolute; top:10px; left:50%; transform:translateX(-50%); background:rgba(168,85,247,0.9); padding:6px 14px; border-radius:20px; font-size:0.75rem; color:#fff; z-index:10; }
-  .banner.ok { background:rgba(34,197,94,0.9); }
-  aside { width:300px; background:#1a1a2e; border-left:1px solid #2a2a3e; display:flex; flex-direction:column; }
-  aside .top { padding:10px; border-bottom:1px solid #2a2a3e; font-size:0.85rem; color:#a855f7; }
-  #msgs { flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:6px; }
-  .m { background:#252540; padding:8px 10px; border-radius:8px; font-size:0.85rem; word-wrap:break-word; }
-  .m.me { background:#a855f7; align-self:flex-end; }
-  .m b { font-size:0.7rem; opacity:0.7; display:block; margin-bottom:2px; }
-  .m.sys { background:#2a2a3e; font-style:italic; color:#aaa; }
-  .send { display:flex; border-top:1px solid #2a2a3e; }
-  .send input { flex:1; padding:10px; border:none; background:#0d0d1a; color:#fff; outline:none; }
-  .send button { padding:0 16px; border:none; background:#a855f7; color:#fff; cursor:pointer; }
-  @media (max-width:700px){ main{flex-direction:column;} aside{width:100%;height:40vh;} }
+
+  .video-area {
+    flex:1; background:#000; display:flex; align-items:center; justify-content:center;
+    position:relative; overflow:hidden;
+  }
+  .video-area video, .video-area iframe { width:100%; height:100%; border:none; background:#000; }
+  .empty-state { text-align:center; color:#8a8a9a; padding:40px; }
+  .empty-state .icon { font-size:4rem; margin-bottom:12px; opacity:.5; }
+
+  .banner {
+    position:absolute; top:16px; left:50%; transform:translateX(-50%);
+    background:rgba(168,85,247,.95); backdrop-filter:blur(10px);
+    padding:8px 18px; border-radius:30px; font-size:.78rem; font-weight:500;
+    color:#fff; z-index:10; box-shadow:0 8px 24px rgba(0,0,0,.3);
+    animation:slideDown .4s ease;
+  }
+  .banner.ok { background:rgba(34,197,94,.95); }
+  .banner.warn { background:rgba(245,158,11,.95); }
+
+  /* ---------- CHAT ---------- */
+  aside {
+    width:320px; background:rgba(18,18,31,.85);
+    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    border-left:1px solid rgba(168,85,247,.15);
+    display:flex; flex-direction:column;
+  }
+  aside .header {
+    padding:14px 16px; border-bottom:1px solid rgba(168,85,247,.15);
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  aside .header h3 { font-size:.9rem; font-weight:600; }
+  aside .header .count {
+    background:rgba(168,85,247,.15); color:#a855f7; font-size:.75rem;
+    font-weight:700; padding:2px 8px; border-radius:20px;
+  }
+
+  #msgs {
+    flex:1; overflow-y:auto; padding:12px 14px;
+    display:flex; flex-direction:column; gap:8px; scroll-behavior:smooth;
+  }
+  #msgs::-webkit-scrollbar { width:6px; }
+  #msgs::-webkit-scrollbar-thumb { background:rgba(168,85,247,.3); border-radius:3px; }
+
+  .m {
+    background:rgba(37,37,64,.7); padding:8px 12px; border-radius:12px;
+    font-size:.85rem; word-wrap:break-word; max-width:90%;
+    animation:msgIn .25s ease;
+  }
+  .m.me {
+    background:linear-gradient(135deg,#a855f7,#ec4899);
+    align-self:flex-end; border-bottom-right-radius:4px;
+  }
+  .m:not(.me) { border-bottom-left-radius:4px; }
+  .m b { font-size:.7rem; font-weight:700; opacity:.75; display:block; margin-bottom:3px; }
+  .m.sys {
+    background:transparent; font-style:italic; color:#8a8a9a;
+    font-size:.78rem; text-align:center; align-self:center; max-width:100%;
+  }
+
+  .send {
+    display:flex; border-top:1px solid rgba(168,85,247,.15);
+    background:rgba(10,10,20,.5); padding:8px; gap:6px;
+  }
+  .send input {
+    flex:1; padding:10px 14px; border-radius:10px;
+    border:1px solid rgba(168,85,247,.15); background:rgba(10,10,20,.8);
+    color:#fff; outline:none; font-size:.85rem; transition:border .2s;
+  }
+  .send input:focus { border-color:#a855f7; }
+  .send button {
+    padding:0 16px; border-radius:10px; border:none;
+    background:linear-gradient(135deg,#a855f7,#ec4899);
+    color:#fff; font-weight:700; cursor:pointer; transition:transform .15s;
+  }
+  .send button:hover { transform:scale(1.05); }
+
+  @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+  @keyframes slideDown { from { opacity:0; transform:translate(-50%,-10px); } to { opacity:1; transform:translate(-50%,0); } }
+  @keyframes msgIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+
+  @media (max-width:780px) {
+    main { flex-direction:column; }
+    aside { width:100%; height:42vh; border-left:none; border-top:1px solid rgba(168,85,247,.15); }
+  }
 </style>
 </head>
 <body>
 
 <div id="login">
-  <h1>🎬 Cine Sync</h1>
-  <input id="name" placeholder="Tu nombre" maxlength="20">
-  <input id="room" placeholder="Sala (ej: cine)" maxlength="20">
+  <div class="logo">🎬</div>
+  <input id="name" placeholder="Tu nombre" maxlength="20" autofocus onkeydown="if(event.key==='Enter')entrar()">
   <button onclick="entrar()">Entrar</button>
-  <small>Comparte el link de la sala para que otros entren</small>
 </div>
 
 <div id="app">
   <header>
-    <input id="url" placeholder="Pega link de Drive, YouTube o URL MP4 directo">
-    <button onclick="cargar()">▶ Cargar para todos</button>
-    <button class="ghost" onclick="copiar()">🔗 Copiar link</button>
+    <div class="input-wrap">
+      <input id="url" placeholder="Pega un link..." onkeydown="if(event.key==='Enter')cargar()">
+      <button class="load-btn" onclick="cargar()">▶</button>
+    </div>
+    <button class="ghost" onclick="copiar()">🔗</button>
+    <div class="online"><span class="dot"></span><span id="count">0</span></div>
   </header>
   <main>
-    <div class="video" id="video"><div class="empty">Nadie ha cargado un video todavía</div></div>
+    <div class="video-area" id="video">
+      <div class="empty-state"><div class="icon">📺</div></div>
+    </div>
     <aside>
-      <div class="top">👥 <span id="count">0</span> en línea</div>
+      <div class="header">
+        <h3>Chat</h3>
+        <span class="count" id="count2">0</span>
+      </div>
       <div id="msgs"></div>
       <div class="send">
         <input id="msg" placeholder="Mensaje..." onkeydown="if(event.key==='Enter')enviar()">
@@ -131,21 +256,23 @@ const HTML = `<!DOCTYPE html>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-let socket, nombre, sala, videoEl, ignorar = false;
+let socket, nombre, videoEl, ignorar = false;
 
 function entrar() {
   nombre = document.getElementById('name').value.trim();
-  sala = document.getElementById('room').value.trim() || 'cine';
-  if (!nombre) return alert('Escribe tu nombre');
+  if (!nombre) return document.getElementById('name').focus();
   socket = io();
-  socket.emit('join', { name: nombre, room: sala });
+  socket.emit('join', nombre);
   document.getElementById('login').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
   setup();
 }
 
 function setup() {
-  socket.on('users', list => document.getElementById('count').textContent = list.length);
+  socket.on('users', list => {
+    document.getElementById('count').textContent = list.length;
+    document.getElementById('count2').textContent = list.length;
+  });
   socket.on('chat', ({ n, t, sys }) => addMsg(n, t, n === nombre, sys));
   socket.on('video', ({ url, time, playing }) => pintar(url, time, playing));
   socket.on('sync', ({ time, playing }) => {
@@ -159,7 +286,7 @@ function setup() {
 }
 
 function sacarDriveId(url) {
-  let m = url.match(/\\/d\\/([^\\/]+)/);
+  let m = url.match(/\/d\/([^\/]+)/);
   if (m) return m[1];
   m = url.match(/[?&]id=([^&]+)/);
   if (m) return m[1];
@@ -170,95 +297,84 @@ function pintar(url, time = 0, playing = false) {
   const box = document.getElementById('video');
   box.innerHTML = '';
 
-  // ---- GOOGLE DRIVE (vía proxy del servidor) ----
   if (url.includes('drive.google.com') || url.includes('docs.google.com')) {
     const id = sacarDriveId(url);
-    if (!id) {
-      box.innerHTML = '<div class="empty">Link de Drive inválido</div>';
-      return;
-    }
+    if (!id) { box.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div></div>'; return; }
     videoEl = document.createElement('video');
     videoEl.src = '/drive/' + id;
-    videoEl.controls = true;
-    videoEl.autoplay = true;
-    videoEl.preload = 'auto';
+    videoEl.controls = true; videoEl.autoplay = true; videoEl.preload = 'auto';
     videoEl.addEventListener('loadedmetadata', () => {
       videoEl.currentTime = time || 0;
       if (playing) videoEl.play().catch(()=>{});
     });
-    videoEl.addEventListener('play', () => { if (!ignorar) socket.emit('play', { room: sala, time: videoEl.currentTime }); });
-    videoEl.addEventListener('pause', () => { if (!ignorar) socket.emit('pause', { room: sala, time: videoEl.currentTime }); });
-    videoEl.addEventListener('seeked', () => { if (!ignorar) socket.emit('seek', { room: sala, time: videoEl.currentTime, playing: !videoEl.paused }); });
+    videoEl.addEventListener('play', () => { if (!ignorar) socket.emit('play', { time: videoEl.currentTime }); });
+    videoEl.addEventListener('pause', () => { if (!ignorar) socket.emit('pause', { time: videoEl.currentTime }); });
+    videoEl.addEventListener('seeked', () => { if (!ignorar) socket.emit('seek', { time: videoEl.currentTime, playing: !videoEl.paused }); });
     videoEl.addEventListener('error', () => {
       box.innerHTML = '';
-      const banner = document.createElement('div');
-      banner.className = 'banner';
-      banner.textContent = '⚠️ No se pudo cargar de Drive. ¿Compartiste el video con la cuenta de servicio?';
+      const b = document.createElement('div');
+      b.className = 'banner warn';
+      b.textContent = '⚠️ Comparte el video con la cuenta de servicio';
       const f = document.createElement('iframe');
       f.src = 'https://drive.google.com/file/d/' + id + '/preview';
       f.allow = 'autoplay; encrypted-media';
       f.allowFullscreen = true;
       box.appendChild(f);
-      box.appendChild(banner);
+      box.appendChild(b);
     });
     box.appendChild(videoEl);
     const ok = document.createElement('div');
     ok.className = 'banner ok';
-    ok.textContent = '✅ Drive sincronizado';
+    ok.textContent = '✅ Sincronizado';
     box.appendChild(ok);
-    setTimeout(() => ok.remove(), 3000);
+    setTimeout(() => ok.remove(), 2500);
     return;
   }
 
-  // ---- YOUTUBE ----
-  const ytMatch = url.match(/(?:youtube\\.com\\/watch\\?v=|youtu\\.be\\/|youtube\\.com\\/embed\\/)([\\w-]+)/);
+  const ytMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([\w-]+)/);
   if (ytMatch) {
-    const banner = document.createElement('div');
-    banner.className = 'banner';
-    banner.textContent = '⚠️ YouTube: cada uno controla su reproducción';
+    const b = document.createElement('div');
+    b.className = 'banner warn';
+    b.textContent = '⚠️ YouTube: sin sync';
     const f = document.createElement('iframe');
     f.src = 'https://www.youtube.com/embed/' + ytMatch[1] + '?autoplay=1&enablejsapi=1';
     f.allow = 'autoplay; encrypted-media; fullscreen';
     f.allowFullscreen = true;
     box.appendChild(f);
-    box.appendChild(banner);
+    box.appendChild(b);
     return;
   }
 
-  // ---- MP4 / URL DIRECTA ----
   videoEl = document.createElement('video');
   videoEl.src = url;
-  videoEl.controls = true;
-  videoEl.autoplay = true;
-  videoEl.preload = 'auto';
+  videoEl.controls = true; videoEl.autoplay = true; videoEl.preload = 'auto';
   videoEl.addEventListener('loadedmetadata', () => {
     videoEl.currentTime = time || 0;
     if (playing) videoEl.play().catch(()=>{});
   });
-  videoEl.addEventListener('play', () => { if (!ignorar) socket.emit('play', { room: sala, time: videoEl.currentTime }); });
-  videoEl.addEventListener('pause', () => { if (!ignorar) socket.emit('pause', { room: sala, time: videoEl.currentTime }); });
-  videoEl.addEventListener('seeked', () => { if (!ignorar) socket.emit('seek', { room: sala, time: videoEl.currentTime, playing: !videoEl.paused }); });
+  videoEl.addEventListener('play', () => { if (!ignorar) socket.emit('play', { time: videoEl.currentTime }); });
+  videoEl.addEventListener('pause', () => { if (!ignorar) socket.emit('pause', { time: videoEl.currentTime }); });
+  videoEl.addEventListener('seeked', () => { if (!ignorar) socket.emit('seek', { time: videoEl.currentTime, playing: !videoEl.paused }); });
   box.appendChild(videoEl);
 }
 
 function cargar() {
   const u = document.getElementById('url').value.trim();
   if (!u) return;
-  socket.emit('load', { room: sala, url: u, name: nombre });
+  socket.emit('load', { url: u, name: nombre });
   document.getElementById('url').value = '';
 }
 
 function enviar() {
   const i = document.getElementById('msg');
   if (!i.value.trim()) return;
-  socket.emit('chat', { room: sala, name: nombre, text: i.value.trim() });
+  socket.emit('chat', { text: i.value.trim() });
   i.value = '';
 }
 
 function copiar() {
-  const url = location.origin + '?room=' + encodeURIComponent(sala);
-  navigator.clipboard.writeText(url);
-  alert('Link copiado:\\n' + url);
+  navigator.clipboard.writeText(location.origin);
+  alert('Link copiado:\n' + location.origin);
 }
 
 function addMsg(n, t, me, sys) {
@@ -267,15 +383,10 @@ function addMsg(n, t, me, sys) {
   d.innerHTML = (sys ? '' : '<b>' + esc(n) + '</b>') + esc(t);
   const box = document.getElementById('msgs');
   box.appendChild(d);
-  box.scrollTop = 99999;
+  box.scrollTop = box.scrollHeight;
 }
 
 function esc(s){ return String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
-
-window.addEventListener('load', () => {
-  const r = new URLSearchParams(location.search).get('room');
-  if (r) document.getElementById('room').value = r;
-});
 </script>
 </body>
 </html>`;
@@ -283,62 +394,46 @@ window.addEventListener('load', () => {
 app.get('/', (_, res) => res.send(HTML));
 
 io.on('connection', socket => {
-  socket.on('join', ({ name, room }) => {
-    if (!name || !room) return;
-    socket.join(room);
-    socket.data.name = name;
-    socket.data.room = room;
-    if (!rooms[room]) rooms[room] = { users: {}, video: null, time: 0, playing: false };
-    rooms[room].users[socket.id] = name;
-    io.to(room).emit('users', Object.values(rooms[room].users));
-    socket.to(room).emit('chat', { n: '📢', t: name + ' entró', sys: true });
-    if (rooms[room].video) {
-      socket.emit('video', { url: rooms[room].video, time: rooms[room].time, playing: rooms[room].playing });
-    }
+  socket.on('join', name => {
+    if (!name) return;
+    state.users[socket.id] = name;
+    io.emit('users', Object.values(state.users));
+    socket.broadcast.emit('chat', { n: '📢', t: name + ' entró', sys: true });
+    if (state.video) socket.emit('video', { url: state.video, time: state.time, playing: state.playing });
   });
 
-  socket.on('chat', ({ room, name, text }) => {
-    io.to(room).emit('chat', { n: name, t: text });
+  socket.on('chat', ({ text }) => {
+    io.emit('chat', { n: state.users[socket.id] || 'Anónimo', t: text });
   });
 
-  socket.on('load', ({ room, url, name }) => {
-    if (!rooms[room]) return;
-    rooms[room].video = url;
-    rooms[room].time = 0;
-    rooms[room].playing = false;
-    io.to(room).emit('video', { url, time: 0, playing: false });
-    io.to(room).emit('chat', { n: '📢', t: name + ' cargó un video', sys: true });
+  socket.on('load', ({ url, name }) => {
+    state.video = url; state.time = 0; state.playing = false;
+    io.emit('video', { url, time: 0, playing: false });
+    io.emit('chat', { n: '📢', t: name + ' cargó un video', sys: true });
   });
 
-  socket.on('play', ({ room, time }) => {
-    if (!rooms[room]) return;
-    rooms[room].time = time; rooms[room].playing = true;
-    socket.to(room).emit('sync', { time, playing: true });
+  socket.on('play', ({ time }) => {
+    state.time = time; state.playing = true;
+    socket.broadcast.emit('sync', { time, playing: true });
   });
 
-  socket.on('pause', ({ room, time }) => {
-    if (!rooms[room]) return;
-    rooms[room].time = time; rooms[room].playing = false;
-    socket.to(room).emit('sync', { time, playing: false });
+  socket.on('pause', ({ time }) => {
+    state.time = time; state.playing = false;
+    socket.broadcast.emit('sync', { time, playing: false });
   });
 
-  socket.on('seek', ({ room, time, playing }) => {
-    if (!rooms[room]) return;
-    rooms[room].time = time; rooms[room].playing = playing;
-    socket.to(room).emit('sync', { time, playing });
+  socket.on('seek', ({ time, playing }) => {
+    state.time = time; state.playing = playing;
+    socket.broadcast.emit('sync', { time, playing });
   });
 
   socket.on('disconnect', () => {
-    const room = socket.data.room;
-    if (room && rooms[room]) {
-      const n = rooms[room].users[socket.id];
-      delete rooms[room].users[socket.id];
-      io.to(room).emit('users', Object.values(rooms[room].users));
-      if (n) socket.to(room).emit('chat', { n: '📢', t: n + ' salió', sys: true });
-      if (Object.keys(rooms[room].users).length === 0) delete rooms[room];
-    }
+    const n = state.users[socket.id];
+    delete state.users[socket.id];
+    io.emit('users', Object.values(state.users));
+    if (n) socket.broadcast.emit('chat', { n: '📢', t: n + ' salió', sys: true });
   });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('🎬 http://localhost:' + PORT));
+server.listen(PORT, () => console.log('🎬 ' + PORT));
