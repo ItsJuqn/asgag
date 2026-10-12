@@ -30,7 +30,9 @@ const HTML = `<!DOCTYPE html>
   main { flex:1; display:flex; overflow:hidden; }
   .video { flex:1; background:#000; display:flex; align-items:center; justify-content:center; position:relative; }
   .video video { width:100%; height:100%; background:#000; }
+  .video iframe { width:100%; height:100%; border:none; background:#000; }
   .video .empty { color:#555; padding:20px; text-align:center; }
+  .banner { position:absolute; top:10px; left:50%; transform:translateX(-50%); background:rgba(168,85,247,0.9); padding:6px 14px; border-radius:20px; font-size:0.75rem; color:#fff; z-index:10; }
   aside { width:300px; background:#1a1a2e; border-left:1px solid #2a2a3e; display:flex; flex-direction:column; }
   aside .top { padding:10px; border-bottom:1px solid #2a2a3e; font-size:0.85rem; color:#a855f7; }
   #msgs { flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:6px; }
@@ -56,7 +58,7 @@ const HTML = `<!DOCTYPE html>
 
 <div id="app">
   <header>
-    <input id="url" placeholder="Pega URL directa del MP4 (https://.../video.mp4)">
+    <input id="url" placeholder="Pega link de Drive, YouTube o URL MP4 directo">
     <button onclick="cargar()">▶ Cargar para todos</button>
     <button class="ghost" onclick="copiar()">🔗 Copiar link</button>
   </header>
@@ -75,7 +77,7 @@ const HTML = `<!DOCTYPE html>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-let socket, nombre, sala, videoEl, ignorar = false;
+let socket, nombre, sala, videoEl, ignorar = false, modoIframe = false;
 
 function entrar() {
   nombre = document.getElementById('name').value.trim();
@@ -93,7 +95,7 @@ function setup() {
   socket.on('chat', ({ n, t, sys }) => addMsg(n, t, n === nombre, sys));
   socket.on('video', ({ url, time, playing }) => pintar(url, time, playing));
   socket.on('sync', ({ time, playing }) => {
-    if (!videoEl) return;
+    if (!videoEl || modoIframe) return;
     ignorar = true;
     if (Math.abs(videoEl.currentTime - time) > 0.8) videoEl.currentTime = time;
     if (playing && videoEl.paused) videoEl.play().catch(()=>{});
@@ -102,9 +104,89 @@ function setup() {
   });
 }
 
+function sacarDriveId(url) {
+  let m = url.match(/\\/d\\/([^\\/]+)/);
+  if (m) return m[1];
+  m = url.match(/[?&]id=([^&]+)/);
+  if (m) return m[1];
+  return null;
+}
+
 function pintar(url, time = 0, playing = false) {
   const box = document.getElementById('video');
   box.innerHTML = '';
+  modoIframe = false;
+
+  // ---- GOOGLE DRIVE ----
+  if (url.includes('drive.google.com') || url.includes('docs.google.com')) {
+    const id = sacarDriveId(url);
+    if (!id) {
+      box.innerHTML = '<div class="empty">Link de Drive inválido</div>';
+      return;
+    }
+
+    // Intento 1: tratar como MP4 directo (a veces funciona en archivos pequeños)
+    const directUrl = 'https://drive.usercontent.google.com/download?id=' + id + '&export=download&confirm=t';
+    const v = document.createElement('video');
+    v.src = directUrl;
+    v.controls = true;
+    v.autoplay = true;
+    v.preload = 'auto';
+    let fallo = false;
+
+    const activarSync = () => {
+      v.addEventListener('play', () => { if (!ignorar) socket.emit('play', { room: sala, time: v.currentTime }); });
+      v.addEventListener('pause', () => { if (!ignorar) socket.emit('pause', { room: sala, time: v.currentTime }); });
+      v.addEventListener('seeked', () => { if (!ignorar) socket.emit('seek', { room: sala, time: v.currentTime, playing: !v.paused }); });
+    };
+
+    const caerAIframe = () => {
+      if (fallo) return;
+      fallo = true;
+      box.innerHTML = '';
+      modoIframe = true;
+      const banner = document.createElement('div');
+      banner.className = 'banner';
+      banner.textContent = '⚠️ Modo Drive: cada uno controla su reproducción';
+      const f = document.createElement('iframe');
+      f.src = 'https://drive.google.com/file/d/' + id + '/preview';
+      f.allow = 'autoplay; encrypted-media';
+      f.allowFullscreen = true;
+      box.appendChild(f);
+      box.appendChild(banner);
+    };
+
+    v.addEventListener('loadedmetadata', () => {
+      activarSync();
+      v.currentTime = time || 0;
+      if (playing) v.play().catch(()=>{});
+    });
+
+    v.addEventListener('error', caerAIframe);
+    // Si tras 6 segundos no cargó metadata, cae a iframe
+    setTimeout(() => { if (v.readyState === 0) caerAIframe(); }, 6000);
+
+    box.appendChild(v);
+    return;
+  }
+
+  // ---- YOUTUBE ----
+  const ytMatch = url.match(/(?:youtube\\.com\\/watch\\?v=|youtu\\.be\\/|youtube\\.com\\/embed\\/)([\\w-]+)/);
+  if (ytMatch) {
+    modoIframe = true;
+    const banner = document.createElement('div');
+    banner.className = 'banner';
+    banner.textContent = '⚠️ YouTube: cada uno controla su reproducción';
+    const f = document.createElement('iframe');
+    f.src = 'https://www.youtube.com/embed/' + ytMatch[1] + '?autoplay=1&enablejsapi=1';
+    f.allow = 'autoplay; encrypted-media; fullscreen';
+    f.allowFullscreen = true;
+    box.appendChild(f);
+    box.appendChild(banner);
+    return;
+  }
+
+  // ---- MP4 / URL DIRECTA ----
   videoEl = document.createElement('video');
   videoEl.src = url;
   videoEl.controls = true;
