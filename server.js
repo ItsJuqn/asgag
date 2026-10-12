@@ -1,12 +1,65 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const { google } = require('googleapis');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
 const rooms = {};
+
+// --- GOOGLE DRIVE AUTH (cuenta de servicio vía variable de entorno) ---
+let drive = null;
+if (process.env.GOOGLE_SERVICE_ACCOUNT) {
+  try {
+    const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+    const auth = new google.auth.GoogleAuth({
+      credentials: creds,
+      scopes: ['https://www.googleapis.com/auth/drive.readonly']
+    });
+    drive = google.drive({ version: 'v3', auth });
+    console.log('✅ Drive API lista. Cuenta:', creds.client_email);
+  } catch (e) {
+    console.error('❌ Error al cargar credenciales de Drive:', e.message);
+  }
+} else {
+  console.log('⚠️  Sin GOOGLE_SERVICE_ACCOUNT. Drive usará modo iframe (sin sync).');
+}
+
+// --- ENDPOINT PROXY PARA DRIVE ---
+// El navegador pide /drive/FILE_ID y nosotros le pasamos el stream de Drive
+app.get('/drive/:fileId', async (req, res) => {
+  if (!drive) return res.status(500).send('Drive no configurado');
+
+  const { fileId } = req.params;
+  const range = req.headers.range;
+
+  try {
+    const driveRes = await drive.files.get(
+      { fileId, alt: 'media' },
+      {
+        responseType: 'stream',
+        headers: range ? { Range: range } : {}
+      }
+    );
+
+    res.setHeader('Content-Type', driveRes.headers['content-type'] || 'video/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (driveRes.headers['content-length']) res.setHeader('Content-Length', driveRes.headers['content-length']);
+    if (driveRes.headers['content-range']) {
+      res.status(206);
+      res.setHeader('Content-Range', driveRes.headers['content-range']);
+    } else {
+      res.status(200);
+    }
+
+    driveRes.data.pipe(res);
+  } catch (e) {
+    console.error('Error Drive:', e.message);
+    res.status(500).send('Error al obtener el video de Drive: ' + e.message);
+  }
+});
 
 const HTML = `<!DOCTYPE html>
 <html lang="es">
@@ -33,6 +86,7 @@ const HTML = `<!DOCTYPE html>
   .video iframe { width:100%; height:100%; border:none; background:#000; }
   .video .empty { color:#555; padding:20px; text-align:center; }
   .banner { position:absolute; top:10px; left:50%; transform:translateX(-50%); background:rgba(168,85,247,0.9); padding:6px 14px; border-radius:20px; font-size:0.75rem; color:#fff; z-index:10; }
+  .banner.ok { background:rgba(34,197,94,0.9); }
   aside { width:300px; background:#1a1a2e; border-left:1px solid #2a2a3e; display:flex; flex-direction:column; }
   aside .top { padding:10px; border-bottom:1px solid #2a2a3e; font-size:0.85rem; color:#a855f7; }
   #msgs { flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:6px; }
@@ -77,7 +131,7 @@ const HTML = `<!DOCTYPE html>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-let socket, nombre, sala, videoEl, ignorar = false, modoIframe = false;
+let socket, nombre, sala, videoEl, ignorar = false;
 
 function entrar() {
   nombre = document.getElementById('name').value.trim();
@@ -95,7 +149,7 @@ function setup() {
   socket.on('chat', ({ n, t, sys }) => addMsg(n, t, n === nombre, sys));
   socket.on('video', ({ url, time, playing }) => pintar(url, time, playing));
   socket.on('sync', ({ time, playing }) => {
-    if (!videoEl || modoIframe) return;
+    if (!videoEl) return;
     ignorar = true;
     if (Math.abs(videoEl.currentTime - time) > 0.8) videoEl.currentTime = time;
     if (playing && videoEl.paused) videoEl.play().catch(()=>{});
@@ -115,65 +169,50 @@ function sacarDriveId(url) {
 function pintar(url, time = 0, playing = false) {
   const box = document.getElementById('video');
   box.innerHTML = '';
-  modoIframe = false;
 
-  // ---- GOOGLE DRIVE ----
+  // ---- GOOGLE DRIVE (vía proxy del servidor) ----
   if (url.includes('drive.google.com') || url.includes('docs.google.com')) {
     const id = sacarDriveId(url);
     if (!id) {
       box.innerHTML = '<div class="empty">Link de Drive inválido</div>';
       return;
     }
-
-    // Intento 1: tratar como MP4 directo (a veces funciona en archivos pequeños)
-    const directUrl = 'https://drive.usercontent.google.com/download?id=' + id + '&export=download&confirm=t';
-    const v = document.createElement('video');
-    v.src = directUrl;
-    v.controls = true;
-    v.autoplay = true;
-    v.preload = 'auto';
-    let fallo = false;
-
-    const activarSync = () => {
-      v.addEventListener('play', () => { if (!ignorar) socket.emit('play', { room: sala, time: v.currentTime }); });
-      v.addEventListener('pause', () => { if (!ignorar) socket.emit('pause', { room: sala, time: v.currentTime }); });
-      v.addEventListener('seeked', () => { if (!ignorar) socket.emit('seek', { room: sala, time: v.currentTime, playing: !v.paused }); });
-    };
-
-    const caerAIframe = () => {
-      if (fallo) return;
-      fallo = true;
+    videoEl = document.createElement('video');
+    videoEl.src = '/drive/' + id;
+    videoEl.controls = true;
+    videoEl.autoplay = true;
+    videoEl.preload = 'auto';
+    videoEl.addEventListener('loadedmetadata', () => {
+      videoEl.currentTime = time || 0;
+      if (playing) videoEl.play().catch(()=>{});
+    });
+    videoEl.addEventListener('play', () => { if (!ignorar) socket.emit('play', { room: sala, time: videoEl.currentTime }); });
+    videoEl.addEventListener('pause', () => { if (!ignorar) socket.emit('pause', { room: sala, time: videoEl.currentTime }); });
+    videoEl.addEventListener('seeked', () => { if (!ignorar) socket.emit('seek', { room: sala, time: videoEl.currentTime, playing: !videoEl.paused }); });
+    videoEl.addEventListener('error', () => {
       box.innerHTML = '';
-      modoIframe = true;
       const banner = document.createElement('div');
       banner.className = 'banner';
-      banner.textContent = '⚠️ Modo Drive: cada uno controla su reproducción';
+      banner.textContent = '⚠️ No se pudo cargar de Drive. ¿Compartiste el video con la cuenta de servicio?';
       const f = document.createElement('iframe');
       f.src = 'https://drive.google.com/file/d/' + id + '/preview';
       f.allow = 'autoplay; encrypted-media';
       f.allowFullscreen = true;
       box.appendChild(f);
       box.appendChild(banner);
-    };
-
-    v.addEventListener('loadedmetadata', () => {
-      activarSync();
-      v.currentTime = time || 0;
-      if (playing) v.play().catch(()=>{});
     });
-
-    v.addEventListener('error', caerAIframe);
-    // Si tras 6 segundos no cargó metadata, cae a iframe
-    setTimeout(() => { if (v.readyState === 0) caerAIframe(); }, 6000);
-
-    box.appendChild(v);
+    box.appendChild(videoEl);
+    const ok = document.createElement('div');
+    ok.className = 'banner ok';
+    ok.textContent = '✅ Drive sincronizado';
+    box.appendChild(ok);
+    setTimeout(() => ok.remove(), 3000);
     return;
   }
 
   // ---- YOUTUBE ----
   const ytMatch = url.match(/(?:youtube\\.com\\/watch\\?v=|youtu\\.be\\/|youtube\\.com\\/embed\\/)([\\w-]+)/);
   if (ytMatch) {
-    modoIframe = true;
     const banner = document.createElement('div');
     banner.className = 'banner';
     banner.textContent = '⚠️ YouTube: cada uno controla su reproducción';
